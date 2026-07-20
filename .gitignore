@@ -1,0 +1,21 @@
+node_modules/
+.wrangler/
+coverage/
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Operating system artifacts
+.DS_Store
+Thumbs.db

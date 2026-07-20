@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cancerculture-watchdog",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-19",
+  "workers_dev": false,
+  "vars": {
+    "WATCHDOG_ENVIRONMENT": "dev",
+    "ALERT_TO": "support@cancerculture.fun"
+  },
+  "secrets": {
+    "required": [
+      "HEALTH_ENDPOINT_URL",
+      "DISCORD_SYNC_HEALTH_SECRET",
+      "RESEND_API_KEY",
+      "ALERT_FROM"
+    ]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "WATCHDOG_STATE",
+        "class_name": "DiscordWatchdogState"
+      }
+    ]
+  },
+  "exports": {
+    "DiscordWatchdogState": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  }
+}
