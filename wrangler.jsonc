@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "cancerculture-watchdog",
+  "account_id": "66aeb3c40b2cd0a34ae65dc74c009dcc",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-19",
   "workers_dev": false,
@@ -31,6 +32,6 @@
     }
   },
   "triggers": {
-    "crons": ["*/5 * * * *"]
+    "crons": []
   }
 }
