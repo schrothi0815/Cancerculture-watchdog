@@ -91,7 +91,7 @@ export async function probeDiscordSyncHealth(
         Accept: "application/json",
         "Cache-Control": "no-store",
       },
-      redirect: "error",
+      redirect: "manual",
       signal: timeoutSignal,
     });
   } catch (error: unknown) {

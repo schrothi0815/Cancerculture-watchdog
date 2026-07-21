@@ -179,7 +179,7 @@ describe("Discord health probe request", () => {
     expect(headers.get("Cache-Control")).toBe("no-store");
     expect(headers.get("Cookie")).toBeNull();
     expect(call.init.body).toBeUndefined();
-    expect(call.init.redirect).toBe("error");
+    expect(call.init.redirect).toBe("manual");
     expect(call.init.signal).toBe(harness.signal);
     expect(harness.timeoutValues).toEqual([DEFAULT_HEALTH_PROBE_TIMEOUT_MS]);
   });
@@ -455,6 +455,7 @@ describe("Discord health probe HTTP and transport errors", () => {
   it.each([
     [401, "unauthorized"],
     [503, "unavailable"],
+    [302, "unexpected_http_status"],
     [404, "unexpected_http_status"],
     [500, "unexpected_http_status"],
   ] as const)("normalizes HTTP %i as %s", async (httpStatus, code) => {
@@ -462,6 +463,7 @@ describe("Discord health probe HTTP and transport errors", () => {
     const harness = createHarness(async () => new Response("untrusted error page", { status: httpStatus }));
     const result = await probeDiscordSyncHealth(VALID_CONFIG, harness.dependencies);
     expect(result).toEqual({ kind: "error", code, httpStatus });
+    expect(harness.calls).toHaveLength(1);
     expect(JSON.stringify(result)).not.toContain("untrusted error page");
     expect(consoleError).not.toHaveBeenCalled();
   });
