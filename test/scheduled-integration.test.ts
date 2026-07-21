@@ -55,6 +55,15 @@ function controller(cron = "*/5 * * * *"): ScheduledController {
   return { cron, scheduledTime: 0, noRetry: vi.fn() };
 }
 
+async function captureScheduledError(harness: ReturnType<typeof runtimeEnv>): Promise<unknown> {
+  return Promise.resolve(worker.scheduled(controller(), harness.env)).then(
+    () => {
+      throw new Error("Expected scheduled handler to reject.");
+    },
+    (error: unknown) => error,
+  );
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -70,6 +79,103 @@ describe("scheduled DEV integration", () => {
     );
 
     expect(fetchMock).not.toHaveBeenCalled();
+    expect(harness.getByName).not.toHaveBeenCalled();
+  });
+
+  it("maps invalid health configuration to a fixed sanitized category", async () => {
+    const invalidSecret = " copied-health-secret";
+    const harness = runtimeEnv({ DISCORD_SYNC_HEALTH_SECRET: invalidSecret });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await captureScheduledError(harness);
+
+    expect(String(error)).toBe("Error: WATCHDOG_CRON_PROBE_ERROR_CONFIGURATION_ERROR");
+    expect(String(error)).not.toContain(invalidSecret);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(harness.getByName).not.toHaveBeenCalled();
+  });
+
+  it("maps HTTP 401 to a fixed sanitized unauthorized category", async () => {
+    const harness = runtimeEnv();
+    const privateBody = `private ${HEALTH_URL} ${harness.env.DISCORD_SYNC_HEALTH_SECRET}`;
+    const fetchMock = vi.fn(async () => new Response(privateBody, { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await captureScheduledError(harness);
+
+    expect(String(error)).toBe("Error: WATCHDOG_CRON_PROBE_ERROR_UNAUTHORIZED");
+    expect(String(error)).not.toContain(privateBody);
+    expect(String(error)).not.toContain(HEALTH_URL);
+    expect(String(error)).not.toContain(harness.env.DISCORD_SYNC_HEALTH_SECRET);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledWith(HEALTH_URL, expect.objectContaining({ method: "GET" }));
+    expect(harness.getByName).not.toHaveBeenCalled();
+  });
+
+  it("maps transport failures to a fixed sanitized network category", async () => {
+    const harness = runtimeEnv();
+    const foreignMessage = `transport ${HEALTH_URL} ${harness.env.DISCORD_SYNC_HEALTH_SECRET}`;
+    const fetchMock = vi.fn(async () => {
+      throw new Error(foreignMessage);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await captureScheduledError(harness);
+
+    expect(String(error)).toBe("Error: WATCHDOG_CRON_PROBE_ERROR_NETWORK_ERROR");
+    expect(String(error)).not.toContain(foreignMessage);
+    expect(String(error)).not.toContain(HEALTH_URL);
+    expect(String(error)).not.toContain(harness.env.DISCORD_SYNC_HEALTH_SECRET);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledWith(HEALTH_URL, expect.objectContaining({ method: "GET" }));
+    expect(harness.getByName).not.toHaveBeenCalled();
+  });
+
+  it("maps invalid health JSON shape to a fixed sanitized response category", async () => {
+    const harness = runtimeEnv();
+    const privateBody = {
+      url: HEALTH_URL,
+      secret: harness.env.DISCORD_SYNC_HEALTH_SECRET,
+      foreign: "private response detail",
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(privateBody), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await captureScheduledError(harness);
+
+    expect(String(error)).toBe("Error: WATCHDOG_CRON_PROBE_ERROR_INVALID_RESPONSE");
+    expect(String(error)).not.toContain(privateBody.foreign);
+    expect(String(error)).not.toContain(HEALTH_URL);
+    expect(String(error)).not.toContain(harness.env.DISCORD_SYNC_HEALTH_SECRET);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledWith(HEALTH_URL, expect.objectContaining({ method: "GET" }));
+    expect(harness.getByName).not.toHaveBeenCalled();
+  });
+
+  it("maps unexpected probe exceptions to a fixed sanitized execution category", async () => {
+    const harness = runtimeEnv();
+    const foreignMessage = `foreign ${HEALTH_URL} ${harness.env.DISCORD_SYNC_HEALTH_SECRET}`;
+    const response = {} as Response;
+    Object.defineProperty(response, "status", {
+      get() {
+        throw new Error(foreignMessage);
+      },
+    });
+    const fetchMock = vi.fn(async () => response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await captureScheduledError(harness);
+
+    expect(String(error)).toBe("Error: WATCHDOG_CRON_PROBE_ERROR_PROBE_EXECUTION_FAILED");
+    expect(String(error)).not.toContain(foreignMessage);
+    expect(String(error)).not.toContain(HEALTH_URL);
+    expect(String(error)).not.toContain(harness.env.DISCORD_SYNC_HEALTH_SECRET);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledWith(HEALTH_URL, expect.objectContaining({ method: "GET" }));
     expect(harness.getByName).not.toHaveBeenCalled();
   });
 
@@ -164,7 +270,7 @@ describe("scheduled DEV integration", () => {
         "ALERT_FROM",
       ],
     });
-    expect(config.triggers).toEqual({ crons: ["*/5 * * * *"] });
+    expect(config.triggers).toEqual({ crons: [] });
     expect(config.migrations).toBeUndefined();
     expect(gitignore).toContain(".dev.vars\n");
     expect(gitignore).toContain(".dev.vars.*\n");
