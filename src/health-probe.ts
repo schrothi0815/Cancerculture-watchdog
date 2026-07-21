@@ -55,6 +55,12 @@ export interface DiscordHealthProbeDependencies {
 
 const REASON_CODE_PATTERN = /^[a-z0-9_]+$/u;
 const HEADER_CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u;
+const DIAGNOSTIC_CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]+/gu;
+const DIAGNOSTIC_BEARER_VALUE_PATTERN = /\bBearer\s+\S+/giu;
+const MAX_DIAGNOSTIC_MESSAGE_LENGTH = 300;
+const MAX_DIAGNOSTIC_ERROR_NAME_LENGTH = 80;
+
+type HealthProbeExceptionStage = "timeout_signal_creation" | "fetch";
 
 export async function probeDiscordSyncHealth(
   config: DiscordHealthProbeConfig,
@@ -68,7 +74,8 @@ export async function probeDiscordSyncHealth(
   try {
     timeoutSignal = dependencies?.createTimeoutSignal(config.timeoutMs) ??
       AbortSignal.timeout(config.timeoutMs);
-  } catch {
+  } catch (error: unknown) {
+    logHealthProbeException(error, "timeout_signal_creation", config);
     return errorResult("network_error");
   }
 
@@ -87,8 +94,10 @@ export async function probeDiscordSyncHealth(
       redirect: "error",
       signal: timeoutSignal,
     });
-  } catch {
-    return errorResult(timeoutSignal.aborted ? "timeout" : "network_error");
+  } catch (error: unknown) {
+    const timeoutSignalAborted = timeoutSignal.aborted;
+    logHealthProbeException(error, "fetch", config, timeoutSignalAborted);
+    return errorResult(timeoutSignalAborted ? "timeout" : "network_error");
   }
 
   if (response.status !== 200) {
@@ -147,6 +156,81 @@ function isValidBearerSecret(value: unknown): value is string {
     value.length <= MAX_HEALTH_PROBE_SECRET_LENGTH &&
     value.trim() === value &&
     !HEADER_CONTROL_CHARACTER_PATTERN.test(value);
+}
+
+function logHealthProbeException(
+  value: unknown,
+  stage: HealthProbeExceptionStage,
+  config: DiscordHealthProbeConfig,
+  timeoutSignalAborted?: boolean,
+): void {
+  try {
+    const baseDiagnostic = {
+      event: "WATCHDOG_HEALTH_PROBE_EXCEPTION",
+      stage,
+      errorName: getDiagnosticErrorName(value, config),
+      errorMessageSanitized: getDiagnosticErrorMessage(value, config),
+      valueType: value === null ? "null" : typeof value,
+    };
+    const diagnostic = stage === "fetch"
+      ? { ...baseDiagnostic, timeoutSignalAborted: timeoutSignalAborted === true }
+      : baseDiagnostic;
+    console.error(JSON.stringify(diagnostic));
+  } catch {
+    // Diagnostics must never change probe behavior.
+  }
+}
+
+function getDiagnosticErrorName(
+  value: unknown,
+  config: DiscordHealthProbeConfig,
+): string {
+  if (!(value instanceof Error)) {
+    return "NonErrorThrow";
+  }
+  try {
+    const name = sanitizeDiagnosticText(value.name, config)
+      .slice(0, MAX_DIAGNOSTIC_ERROR_NAME_LENGTH);
+    return name.length > 0 ? name : "Error";
+  } catch {
+    return "Error";
+  }
+}
+
+function getDiagnosticErrorMessage(
+  value: unknown,
+  config: DiscordHealthProbeConfig,
+): string {
+  if (value instanceof Error) {
+    try {
+      return sanitizeDiagnosticText(value.message, config);
+    } catch {
+      return "Error message unavailable";
+    }
+  }
+  if (typeof value === "string") {
+    return sanitizeDiagnosticText(value, config);
+  }
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return sanitizeDiagnosticText(String(value), config);
+  }
+  return `Non-Error value of type ${value === null ? "null" : typeof value}`;
+}
+
+function sanitizeDiagnosticText(
+  value: string,
+  config: DiscordHealthProbeConfig,
+): string {
+  let sanitized = value
+    .split(config.bearerSecret).join("[REDACTED_SECRET]")
+    .split(config.endpointUrl).join("[REDACTED_ENDPOINT]")
+    .replace(DIAGNOSTIC_BEARER_VALUE_PATTERN, "Bearer [REDACTED]")
+    .replace(DIAGNOSTIC_CONTROL_CHARACTER_PATTERN, " ")
+    .trim();
+  if (sanitized.length > MAX_DIAGNOSTIC_MESSAGE_LENGTH) {
+    sanitized = sanitized.slice(0, MAX_DIAGNOSTIC_MESSAGE_LENGTH);
+  }
+  return sanitized;
 }
 
 function parseHealthSnapshot(value: unknown): DiscordHealthSnapshot | null {

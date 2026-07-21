@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_HEALTH_PROBE_TIMEOUT_MS,
   MAX_HEALTH_PROBE_SECRET_LENGTH,
@@ -92,6 +92,15 @@ function configWith(overrides: Partial<DiscordHealthProbeConfig>): DiscordHealth
   return { ...VALID_CONFIG, ...overrides };
 }
 
+function parseDiagnosticLog(value: unknown): Record<string, unknown> {
+  expect(value).toEqual(expect.any(String));
+  return JSON.parse(value as string) as Record<string, unknown>;
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe("Discord health probe configuration", () => {
   it("uses the named ten-second default timeout", () => {
     expect(DEFAULT_HEALTH_PROBE_TIMEOUT_MS).toBe(10_000);
@@ -177,6 +186,17 @@ describe("Discord health probe request", () => {
 });
 
 describe("Discord health probe valid responses", () => {
+  it("does not log an exception diagnostic for a successful probe", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const harness = createHarness();
+
+    await expect(probeDiscordSyncHealth(VALID_CONFIG, harness.dependencies)).resolves.toMatchObject({
+      kind: "health",
+    });
+
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
   it.each(["healthy", "degraded", "offline"] as const)(
     "normalizes authoritative %s status",
     async (status) => {
@@ -438,10 +458,12 @@ describe("Discord health probe HTTP and transport errors", () => {
     [404, "unexpected_http_status"],
     [500, "unexpected_http_status"],
   ] as const)("normalizes HTTP %i as %s", async (httpStatus, code) => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const harness = createHarness(async () => new Response("untrusted error page", { status: httpStatus }));
     const result = await probeDiscordSyncHealth(VALID_CONFIG, harness.dependencies);
     expect(result).toEqual({ kind: "error", code, httpStatus });
     expect(JSON.stringify(result)).not.toContain("untrusted error page");
+    expect(consoleError).not.toHaveBeenCalled();
   });
 
   it("cancels an unused non-200 response body", async () => {
@@ -469,6 +491,7 @@ describe("Discord health probe HTTP and transport errors", () => {
   });
 
   it("normalizes abort by the request timeout signal as timeout", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const controller = new AbortController();
     const harness = createHarness(async () => {
       controller.abort();
@@ -479,30 +502,91 @@ describe("Discord health probe HTTP and transport errors", () => {
       code: "timeout",
     });
     expect(harness.calls).toHaveLength(1);
+    expect(consoleError).toHaveBeenCalledTimes(1);
+    expect(parseDiagnosticLog(consoleError.mock.calls[0]?.[0])).toMatchObject({
+      event: "WATCHDOG_HEALTH_PROBE_EXCEPTION",
+      stage: "fetch",
+      timeoutSignalAborted: true,
+    });
   });
 
-  it("normalizes other fetch throws without exposing their message or secret", async () => {
+  it("logs a sanitized fetch TypeError without changing the network error result", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const harness = createHarness(async () => {
-      throw new Error(`transport failed with ${TEST_SECRET}`);
+      throw new TypeError("public network connection failed");
     });
     const result = await probeDiscordSyncHealth(VALID_CONFIG, harness.dependencies);
     expect(result).toEqual({ kind: "error", code: "network_error" });
-    expect(JSON.stringify(result)).not.toContain(TEST_SECRET);
-    expect(JSON.stringify(result)).not.toContain("transport failed");
+    expect(consoleError).toHaveBeenCalledTimes(1);
+    const logLine = consoleError.mock.calls[0]?.[0];
+    expect(parseDiagnosticLog(logLine)).toEqual({
+      event: "WATCHDOG_HEALTH_PROBE_EXCEPTION",
+      stage: "fetch",
+      errorName: "TypeError",
+      errorMessageSanitized: "public network connection failed",
+      valueType: "object",
+      timeoutSignalAborted: false,
+    });
+    expect(logLine).not.toContain(TEST_SECRET);
+    expect(logLine).not.toContain(TEST_ENDPOINT);
   });
 
   it("normalizes timeout-signal construction failure without fetching", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const harness = createHarness();
     const dependencies: DiscordHealthProbeDependencies = {
       ...harness.dependencies,
       createTimeoutSignal: () => {
-        throw new Error(`signal failed with ${TEST_SECRET}`);
+        throw new Error(`signal failed for ${TEST_ENDPOINT} with ${TEST_SECRET}`);
       },
     };
     const result = await probeDiscordSyncHealth(VALID_CONFIG, dependencies);
     expect(result).toEqual({ kind: "error", code: "network_error" });
     expect(harness.calls).toHaveLength(0);
     expect(JSON.stringify(result)).not.toContain(TEST_SECRET);
+    expect(consoleError).toHaveBeenCalledTimes(1);
+    const logLine = consoleError.mock.calls[0]?.[0];
+    expect(parseDiagnosticLog(logLine)).toMatchObject({
+      event: "WATCHDOG_HEALTH_PROBE_EXCEPTION",
+      stage: "timeout_signal_creation",
+      errorName: "Error",
+      valueType: "object",
+    });
+    expect(logLine).not.toContain(TEST_SECRET);
+    expect(logLine).not.toContain(TEST_ENDPOINT);
+  });
+
+  it("fully redacts sensitive fetch exception text and bounds it to one line", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const sensitiveMessage = [
+      `request to ${TEST_ENDPOINT}`,
+      `failed with ${TEST_SECRET}`,
+      `Authorization: Bearer ${TEST_SECRET}`,
+      "x".repeat(400),
+    ].join("\r\n");
+    const harness = createHarness(async () => {
+      throw new TypeError(sensitiveMessage);
+    });
+
+    await expect(probeDiscordSyncHealth(VALID_CONFIG, harness.dependencies)).resolves.toEqual({
+      kind: "error",
+      code: "network_error",
+    });
+
+    expect(consoleError).toHaveBeenCalledTimes(1);
+    const logLine = consoleError.mock.calls[0]?.[0];
+    const diagnostic = parseDiagnosticLog(logLine);
+    const sanitizedMessage = diagnostic.errorMessageSanitized;
+    expect(sanitizedMessage).toEqual(expect.any(String));
+    expect((sanitizedMessage as string).length).toBeLessThanOrEqual(300);
+    expect(sanitizedMessage).toContain("[REDACTED_ENDPOINT]");
+    expect(sanitizedMessage).toContain("[REDACTED_SECRET]");
+    expect(sanitizedMessage).toContain("Authorization: Bearer [REDACTED]");
+    expect(logLine).not.toMatch(/[\r\n]/u);
+    expect(logLine).not.toContain(TEST_ENDPOINT);
+    expect(logLine).not.toContain(TEST_SECRET);
+    expect(logLine).not.toContain(TEST_SECRET.slice(0, 10));
+    expect(logLine).not.toContain(TEST_SECRET.slice(-10));
   });
 
   it("does not expose a secret embedded in an invalid response body", async () => {
